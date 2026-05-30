@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="dosc/trevis_logo.png" alt="TREVIS logo" width="220"/>
+  <img src="docs/trevis_logo.png" alt="TREVIS logo" width="220"/>
 </p>
 
 <h1 align="center">
