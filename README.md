@@ -1,3 +1,3 @@
 <p align="center">
-  <img src="docs/trevis_logo.png" alt="TREVIS logo" width="500"/>
+  <img src="docs/trevis_logo.png" alt="TREVIS logo" width="400"/>
 </p>
