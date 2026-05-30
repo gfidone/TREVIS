@@ -20,12 +20,12 @@ class MHA(nn.Module):
         self.W_o = nn.Linear(d_model, d_model, bias=False) 
 
     def _build_causal_mask(self, S_q, S_k_total, past_len, device, dtype):
-        q_pos = torch.arange(S_q, device=device).unsqueeze(1) + past_len      # (S_q, 1)
-        k_pos = torch.arange(S_k_total, device=device).unsqueeze(0)           # (1, S_k_total)
-        mask = k_pos > q_pos  # True dove va mascherato
+        q_pos = torch.arange(S_q, device=device).unsqueeze(1) + past_len      
+        k_pos = torch.arange(S_k_total, device=device).unsqueeze(0)          
+        mask = k_pos > q_pos 
         causal_mask = torch.zeros((S_q, S_k_total), device=device, dtype=dtype)
         causal_mask = causal_mask.masked_fill(mask, float("-inf"))
-        return causal_mask.unsqueeze(0).unsqueeze(0)  # (1, 1, S_q, S_k_total)
+        return causal_mask.unsqueeze(0).unsqueeze(0)  
 
     def forward(self, 
                 q, 
