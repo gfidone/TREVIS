@@ -9,27 +9,36 @@ TREVIS (Tree REpresentations from Variational Inference in latent Space) is a ge
 To run TREVIS, follow these steps:
 
 1. **Download this repository on your local machine**.
-2. **Fit random train DTS**. Edit the `config/fit_trees_config.json` file with your preferred configuration and run:
+2. **Fit random train DTS**. Edit the `config/random_trees_config.json` file with your preferred configuration and run:
 
    ```bash
-    python3 scripts/fit_random_trees.py 
+    python3 scripts/random_trees_.py 
     ```
-4. **Tokenize random DTs**. Edit the `config/tokenize_trees_config.json` file with your preferred configuration and run:
+4. **Tokenize random DTs**. Edit the `config/tokenize_config.json` file with your preferred configuration and run:
 
    ```bash
-    python3 scripts/tokenize_trees.py 
+    python3 scripts/tokenize.py 
     ```
-5. **Train the TTVAE**. Edit the `config/ttvae_config.json` file with your preferred configuration and run:
+5. **Train the TTVAE**. Edit the `config/train_ttvae_config.json` file with your preferred configuration and run:
 
     ```bash
     python3 scripts/train_ttvae.py 
     ```
 
-7. **Optimize via Gradient Ascent**. Edit the `config/gradient_config.json` file with your preferred configuration and run:
+7. **Optimize via gradient ascent**. Edit the `config/gradient_config.json` file with your preferred configuration and run:
 
    ```bash
     python3 scripts/gradient.py 
     ```
+
+Alternatively, set all configuration files in `config` and run:
+
+  
+  ```bash
+  bash scripts/trevis.sh
+  ```
+
+Which automatically exectutes steps 1-7. Best found DTs are stored in `experiments/best_dts.json`
 
 # License
 TREVIS is distributed under the GNU General Public License. Refer to LICENSE.txt for details.
