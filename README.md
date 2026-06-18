@@ -40,5 +40,7 @@ Alternatively, set all configuration files in `config` and run:
 
 Which automatically exectutes steps 1-7. Best found DTs are stored in `experiments/best_dts.json`
 
+# Data
+
 # License
 TREVIS is distributed under the GNU General Public License. Refer to LICENSE.txt for details.
