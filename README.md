@@ -1,3 +1,35 @@
 <p align="center">
   <img src="docs/trevis_logo.png" alt="TREVIS logo" width="350"/>
 </p>
+
+TREVIS (Tree REpresentations from Variational Inference in latent Space) is a generative approach to Decision Tree (DT) learning based on the exploration of the latent space of a Tree Transformer Variational Auto-Encoder (TTVAE), allowing for optimization w.r.t. complex objectives.
+
+# Usage
+
+To run TREVIS, follow these steps:
+
+1. **Download this repository on your local machine**.
+2. **Fit random train DTS**. Edit the `config/fit_trees_config.json` file with your preferred configuration and run:
+
+   ```bash
+    python3 scripts/fit_random_trees.py 
+    ```
+4. **Tokenize random DTs**. Edit the `config/tokenize_trees_config.json` file with your preferred configuration and run:
+
+   ```bash
+    python3 scripts/tokenize_trees.py 
+    ```
+5. **Train the TTVAE**. Edit the `config/ttvae_config.json` file with your preferred configuration and run:
+
+    ```bash
+    python3 scripts/train_ttvae.py 
+    ```
+
+7. **Optimize via Gradient Ascent**. Edit the `config/gradient_config.json` file with your preferred configuration and run:
+
+   ```bash
+    python3 scripts/gradient.py 
+    ```
+
+# License
+TREVIS is distributed under the GNU General Public License. Refer to LICENSE.txt for details.
