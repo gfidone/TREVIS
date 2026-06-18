@@ -42,5 +42,17 @@ to automatically run steps 1-7. Best found DTs are stored in `experiments/best_d
 
 # Data
 
+# Experiments
+
+## Competitors
+
+We compare against the following competitors. Please refer to the corresponding repositories for implementation details and requirements:
+
+- `gosdt_lb`: [GOSDT with guesses](https://github.com/ubc-systopia/gosdt-guesses)
+- `DL8.5`: [PyDL8.5](https://github.com/aia-uclouvain/pydl8.5)
+- `DL8.5-lbguess`: [PyDL8.5 with guessed tighter lower bounds](https://github.com/ubc-systopia/pydl8.5-lbguess)
+- `FlowOCT`: [ODTLearn FlowOCT implementation](https://github.com/D3M-Research-Group/odtlearn/blob/main/odtlearn/flow_oct.py)
+- `CART`: [Scikit-learn DecisionTreeClassifier](https://scikit-learn.org/stable/modules/generated/sklearn.tree.DecisionTreeClassifier.html)
+
 # License
 TREVIS is distributed under the GNU General Public License. Refer to LICENSE.txt for details.
