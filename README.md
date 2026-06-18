@@ -35,7 +35,7 @@ Alternatively, set all configuration files in `config` and run:
 
   
   ```bash
-  bash scripts/trevis.sh
+  bash trevis.sh
   ```
 
 to automatically run steps 2-5. Best found DTs are stored in `experiments/best_dts.json`
