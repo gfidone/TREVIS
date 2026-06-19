@@ -720,3 +720,52 @@ def predict_from_flowoct_artifact(artifact, X):
 
 
 
+def tree_stats(tree):
+    """
+    Return actual depth, number of internal nodes, and number of leaves
+    for a DL8.5-style tree dictionary.
+    A leaf is assumed to be any node with a 'value' key.
+    An internal node is assumed to be any node with a 'feat' key.
+    """
+
+    def visit(node):
+        if "value" in node:
+            return {
+                "depth": 0,
+                "internal_nodes": 0,
+                "leaves": 1,
+            }
+
+        if "feat" in node:
+            left_stats = visit(node["left"])
+            right_stats = visit(node["right"])
+
+            return {
+                "depth": 1 + max(left_stats["depth"], right_stats["depth"]),
+                "internal_nodes": (
+                    1
+                    + left_stats["internal_nodes"]
+                    + right_stats["internal_nodes"]
+                ),
+                "leaves": left_stats["leaves"] + right_stats["leaves"],
+            }
+
+        raise ValueError(f"Unrecognized node format: {node}")
+
+    return visit(tree)
+
+
+def compute_dl85_tree_stats(clf):
+    """
+    #compute structural information from the trained DL8.5 tree.
+    """
+    stats = tree_stats(clf.tree_)
+
+    return {
+        "tree_n_nodes": stats["internal_nodes"] + stats["leaves"],
+        "tree_n_leaves": stats["leaves"],
+        "tree_n_internal_nodes": stats["internal_nodes"],
+        "tree_n_splits": stats["internal_nodes"],
+        "tree_actual_depth": stats["depth"],
+        "tree_raw": clf.tree_,
+    }
