@@ -426,3 +426,297 @@ def gosdt_dict_to_sklearn_arrays(tree_dict, threshold_value=0.5):
         np.array(feature, dtype=np.int64),
         np.array(threshold, dtype=np.float64),
     )
+
+
+# here below useful function to extract information from trees trained through FLOW
+def build_flowoct_node_dict(flow_clf):
+    """
+    Build node status dictionary from a fitted FlowOCT classifier.
+
+    Each entry has format:
+        node -> (pruned, branching, selected_feature, cutoff, leaf, value)
+    """
+
+    node_dict = {}
+
+    for node in np.arange(1, flow_clf._tree.total_nodes + 1):
+        node_dict[int(node)] = flow_clf._get_node_status(
+            flow_clf.b_value,
+            flow_clf.w_value,
+            flow_clf.p_value,
+            node,
+            feature_names=flow_clf._X_col_labels,
+        )
+
+    return node_dict
+
+
+def get_actual_tree_stats(node_dict):
+    """
+    Compute actual depth, actual number of nodes, actual number of leaves,
+    and actual number of internal nodes from a FlowOCT node_dict.
+
+    node_dict format:
+        node -> (pruned, branching, selected_feature, cutoff, leaf, value)
+    """
+
+    actual_nodes = []
+    actual_leaf_nodes = []
+    actual_internal_nodes = []
+
+    for node, status in node_dict.items():
+        pruned, branching, selected_feature, cutoff, leaf, value = status
+
+        if not pruned:
+            node = int(node)
+            actual_nodes.append(node)
+
+            if leaf:
+                actual_leaf_nodes.append(node)
+
+            elif branching:
+                actual_internal_nodes.append(node)
+
+    actual_depth = (
+        max(int(np.floor(np.log2(node))) for node in actual_nodes)
+        if actual_nodes
+        else 0
+    )
+
+    return {
+        "actual_depth": actual_depth,
+        "actual_n_nodes": len(actual_nodes),
+        "actual_n_leaves": len(actual_leaf_nodes),
+        "actual_n_internal_nodes": len(actual_internal_nodes),
+        "actual_nodes": sorted(actual_nodes),
+        "actual_leaf_nodes": sorted(actual_leaf_nodes),
+        "actual_internal_nodes": sorted(actual_internal_nodes),
+    }
+
+
+def extract_flowoct_tree_structure(node_dict):
+    """
+    Convert FlowOCT node_dict into an explicit, pickle-safe tree structure.
+
+    node_dict format:
+        node -> (pruned, branching, selected_feature, cutoff, leaf, value)
+
+    Returned format:
+        node -> {
+            "node": int,
+            "type": "branch" | "leaf" | "active_unknown",
+            "feature": selected_feature or None,
+            "cutoff": cutoff or None,
+            "prediction": value or None,
+            "left_child": int or None,
+            "right_child": int or None,
+        }
+
+    Pruned nodes are excluded.
+    """
+
+    tree_structure = {}
+
+    for node, status in node_dict.items():
+        pruned, branching, selected_feature, cutoff, leaf, value = status
+
+        if pruned:
+            continue
+
+        node = int(node)
+
+        if leaf:
+            tree_structure[node] = {
+                "node": node,
+                "type": "leaf",
+                "feature": None,
+                "cutoff": None,
+                "prediction": value,
+                "left_child": None,
+                "right_child": None,
+            }
+
+        elif branching:
+            left_child = 2 * node
+            right_child = 2 * node + 1
+
+            tree_structure[node] = {
+                "node": node,
+                "type": "branch",
+                "feature": selected_feature,
+                "cutoff": cutoff,
+                "prediction": None,
+                "left_child": left_child,
+                "right_child": right_child,
+            }
+
+        else:
+            tree_structure[node] = {
+                "node": node,
+                "type": "active_unknown",
+                "feature": None,
+                "cutoff": cutoff,
+                "prediction": None,
+                "left_child": None,
+                "right_child": None,
+            }
+
+    return tree_structure
+
+
+def extract_flowoct_nested_tree(tree_structure, root_node=1):
+    """
+    Convert the flat tree_structure into a nested dictionary.
+
+    This is useful if you want a recursive tree representation:
+        root -> left subtree / right subtree
+
+    Pruned children are returned as None.
+    """
+
+    if root_node not in tree_structure:
+        return None
+
+    node_info = tree_structure[root_node]
+
+    if node_info["type"] == "leaf":
+        return {
+            "node": node_info["node"],
+            "type": "leaf",
+            "prediction": node_info["prediction"],
+        }
+
+    if node_info["type"] == "branch":
+        return {
+            "node": node_info["node"],
+            "type": "branch",
+            "feature": node_info["feature"],
+            "cutoff": node_info["cutoff"],
+            "left_child": extract_flowoct_nested_tree(
+                tree_structure,
+                node_info["left_child"],
+            ),
+            "right_child": extract_flowoct_nested_tree(
+                tree_structure,
+                node_info["right_child"],
+            ),
+        }
+
+    return {
+        "node": node_info["node"],
+        "type": node_info["type"],
+    }
+
+
+def extract_flowoct_artifact(flow_clf, params=None):
+    """
+    Extract a pickle-safe representation of a fitted FlowOCT model.
+
+    Do NOT pickle the full FlowOCT object, because it can contain Gurobi/CFFI
+    backend objects that are not pickleable.
+
+    This artifact stores:
+        - node statuses
+        - explicit flat tree structure
+        - explicit nested tree structure
+        - actual tree stats
+        - b, w, p solution values
+        - feature labels
+        - class labels
+        - total number of nodes
+        - model parameters
+    """
+
+    node_dict = build_flowoct_node_dict(flow_clf)
+    tree_stats = get_actual_tree_stats(node_dict)
+    tree_structure = extract_flowoct_tree_structure(node_dict)
+    nested_tree_structure = extract_flowoct_nested_tree(tree_structure, root_node=1)
+
+    artifact = {
+        "params": params if params is not None else {},
+
+        "node_dict": node_dict,
+
+        "tree_structure": tree_structure,
+        "nested_tree_structure": nested_tree_structure,
+
+        "tree_stats": tree_stats,
+
+        "b_value": dict(flow_clf.b_value),
+        "w_value": dict(flow_clf.w_value),
+        "p_value": dict(flow_clf.p_value),
+
+        "X_col_labels": list(flow_clf._X_col_labels),
+        "labels": list(flow_clf._labels),
+        "total_nodes": flow_clf._tree.total_nodes,
+    }
+
+    return artifact
+
+
+def predict_from_flowoct_artifact(artifact, X):
+    """
+    Predict using a saved FlowOCT artifact.
+
+    This avoids needing to pickle/load the full FlowOCT object.
+    It traverses artifact["tree_structure"] from node 1.
+
+    FlowOCT node status stores:
+        - branch feature
+        - cutoff
+        - leaf prediction
+
+    Assumption:
+        left branch is taken when X[feature] <= cutoff,
+        right branch otherwise.
+
+    This matches the standard binary-tree convention used by ODT-style trees.
+    """
+    tree_structure = artifact["tree_structure"]
+
+    if not isinstance(X, pd.DataFrame):
+        feature_names = artifact.get("X_col_labels", None)
+        if feature_names is None:
+            raise ValueError("X must be a DataFrame or artifact must contain X_col_labels.")
+        X_eval = pd.DataFrame(X, columns=feature_names)
+    else:
+        X_eval = X
+
+    preds = []
+
+    for _, row in X_eval.iterrows():
+        node = 1
+
+        while True:
+            if node not in tree_structure:
+                raise ValueError(
+                    f"Traversal reached missing/pruned node {node}. "
+                    "Cannot predict from this artifact."
+                )
+
+            node_info = tree_structure[node]
+
+            if node_info["type"] == "leaf":
+                preds.append(node_info["prediction"])
+                break
+
+            if node_info["type"] != "branch":
+                raise ValueError(
+                    f"Cannot predict from node {node} with type={node_info['type']}."
+                )
+
+            feature = node_info["feature"]
+            cutoff = node_info["cutoff"]
+
+            value = row[feature]
+
+            if value <= cutoff:
+                node = node_info["left_child"]
+            else:
+                node = node_info["right_child"]
+
+    return np.asarray(preds)
+
+
+
+
