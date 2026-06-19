@@ -1,0 +1,22 @@
+{
+    "dataset_name": "heloc",
+    "precision": 4,
+    "random_state": 42,
+    "data_dir": "../data/data_splitted_binarized",
+    "gbdt_hyperparam_dir": "../data/gbdt_guesses_hyperparam",
+    "models_dir": "../experiments/gosdt_tree_gbdt/models_bootstrap",
+    "results_dir": "../experiments/gosdt_tree_gbdt/results_bootstrap",
+    "regularizations": [
+        0.001,
+        0.005,
+        0.0001,
+        0.0005,
+        0.01
+    ],
+    "similar_support": false,
+    "depth_budget": 5,
+    "time_limit": 3600,
+    "verbose": true,
+    "bootstrap_n_iter": 200,
+    "bootstrap_seed": 12345
+}
