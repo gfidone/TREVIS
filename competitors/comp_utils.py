@@ -85,6 +85,9 @@ def compute_bootstrap_metrics_ci(
     }
 
 
+
+
+### util functions for sklearn tree evaluation
 def is_leaf(inner_tree, index):
     """Return True if node index is currently a leaf."""
     if index == TREE_LEAF:
@@ -250,3 +253,90 @@ def compute_tree_stats_after_pruning(clf, feature_names=None):
     stats["tree_export_text_after_pruning"] = tree_text
 
     return stats
+
+
+
+
+## util functions for gosdt tree evaluation
+class SimpleTree:
+    def __init__(self, children_left, children_right, feature, threshold):
+        self.children_left = np.array(children_left)
+        self.children_right = np.array(children_right)
+        self.feature = np.array(feature)
+        self.threshold = np.array(threshold)
+
+        self.node_count = len(self.feature)
+        self.n_outputs = 1
+        self.max_depth = self._max_depth()
+
+    def _max_depth(self):
+        def depth(node):
+            left = self.children_left[node]
+            right = self.children_right[node]
+
+            if left == -1 and right == -1:
+                return 0
+
+            return 1 + max(depth(left), depth(right))
+
+        return depth(0)
+
+
+class ClfGOSDT:
+    def __init__(self, children_left, children_right, feature, threshold):
+        self.tree_ = SimpleTree(
+            children_left,
+            children_right,
+            feature,
+            threshold,
+        )
+
+        valid_features = feature[feature >= 0]
+        self.n_features_in_ = (
+            int(np.max(valid_features)) + 1 if len(valid_features) > 0 else 0
+        )
+
+
+def gosdt_tree_to_dict(s):
+    s = re.sub(r'([{\[,]\s*)([A-Za-z ]+)(\s*:)', r'\1"\2"\3', s)
+    s = re.sub(r'("feature"\s*:\s*\d+)\s*\[', r'\1,', s)
+    s = s.replace("]", "")
+    return ast.literal_eval(s)
+
+
+def gosdt_dict_to_sklearn_arrays(tree_dict, threshold_value=0.5):
+    children_left = []
+    children_right = []
+    feature = []
+    threshold = []
+
+    def build(node):
+        node_id = len(feature)
+
+        children_left.append(-1)
+        children_right.append(-1)
+        feature.append(-2)
+        threshold.append(-2.0)
+
+        if "prediction" in node:
+            return node_id
+
+        feature[node_id] = int(node["feature"])
+        threshold[node_id] = float(threshold_value)
+
+        left_id = build(node["left child"])
+        right_id = build(node["right child"])
+
+        children_left[node_id] = left_id
+        children_right[node_id] = right_id
+
+        return node_id
+
+    build(tree_dict)
+
+    return (
+        np.array(children_left, dtype=np.int64),
+        np.array(children_right, dtype=np.int64),
+        np.array(feature, dtype=np.int64),
+        np.array(threshold, dtype=np.float64),
+    )
