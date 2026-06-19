@@ -1,0 +1,26 @@
+{
+    "dataset_name": "heloc",
+    "precision": 4,
+    "random_state": 42,
+    "data_dir": "../data/data_splitted_binarized",
+    "gbdt_hyperparam_dir": "../data/gbdt_guesses_hyperparam",
+    "models_dir": "../experiments/dl85/models_bootstrap",
+    "results_dir": "../experiments/dl85/results_bootstrap",
+    "max_depths": [
+        3,
+        4,
+        5
+    ],
+    "min_samples_leaf_fracs": [
+        0.001,
+        0.005,
+        0.0001,
+        0.0005,
+        0.01
+    ],
+    "time_limit": 3600,
+    "default_gbdt_n_est": 100,
+    "default_gbdt_max_depth": 3,
+    "bootstrap_n_iter": 200,
+    "bootstrap_seed": 12345
+}
