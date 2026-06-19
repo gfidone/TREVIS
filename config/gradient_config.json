@@ -1,6 +1,7 @@
 {
     "dataset_name": "heloc",
     "sample_size": 100000,
+    "size_of_trees" : 20000,
     "max_depth": 5,
     "precision": 4,
     "data_dir": "../data/data_splitted",
