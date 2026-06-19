@@ -7,6 +7,7 @@
     "data_dir": "../data/data_splitted",
     "base_dir_tree": "../experiments/random_trees",
     "tokenized_trees_dir": "../experiments/tokenized_trees",
+    "saved_model_path" : "../experiments/trained_ttvae_models",
     "reference_metric": "f1_weighted",
     "regularizations": [
         0.0,
