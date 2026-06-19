@@ -1,1 +1,1 @@
-{"dataset_name": "heloc", "sample_size": 100000, "max_depth": 5, "precision": 4, "target_dir": "../experiments/random_trees"}
+{"dataset_name": "heloc", "sample_size": 100000, "max_depth": 5, "precision": 4, "target_dir": "../experiments/random_trees","data_dir": "../data/data_splitted", "base_dir_tree": "../experiments/random_trees"}
