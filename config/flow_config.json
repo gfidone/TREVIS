@@ -1,9 +1,9 @@
 {
     "dataset_name": "heloc",
     "precision": 4,
-    "data_dir": "../data/data_splitted_binarized",
-    "models_dir": "../experiments/flowoct_tree/models_bootstrap",
-    "results_dir": "../experiments/flowoct_tree/results_bootstrap",
+    "data_dir": "../data/data_splitted_discretized",
+    "models_dir": "../experiments/flowoct_tree/models",
+    "results_dir": "../experiments/flowoct_tree/results",
     "regularizations": [
         0.01
     ],
