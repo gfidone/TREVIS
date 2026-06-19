@@ -10,11 +10,7 @@ from sklearn.ensemble import GradientBoostingClassifier
 
 from gosdt import GOSDTClassifier
 from tree_encoding import TreeEncoder
-from comp_utils import (
-    compute_metrics,
-    compute_bootstrap_metrics_ci,
-    decode_gosdt_tree,
-)
+from comp_utils import *
 
 
 def save_pickle(obj, path):
