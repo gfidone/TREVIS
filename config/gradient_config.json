@@ -22,6 +22,7 @@
     "bo_iterations": 10,
     "candidate_batch_size": 500,
     "n_grid": 50000,
+    "random_seed_split" : 42,
     "sample_dist": "standard_normal",
     "grad_ascent": true,
     "ga_lr": 0.001,
