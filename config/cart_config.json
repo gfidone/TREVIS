@@ -3,8 +3,8 @@
     "precision": 4,
     "random_state": 42,
     "data_dir": "../data/data_splitted",
-    "model_dir": "../experiments/CART/models",
-    "results_dir": "../experiments/CART/results",
+    "model_dir": "../experiments/cart/models",
+    "results_dir": "../experiments/cart/results",
     "max_depths": [
         2,
         3,
