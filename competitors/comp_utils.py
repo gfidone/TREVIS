@@ -85,6 +85,92 @@ def compute_bootstrap_metrics_ci(
     }
 
 
+def compute_metrics_from_predictions(y_true, y_pred):
+    return {
+        "accuracy": accuracy_score(y_true, y_pred),
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+
+        "f1": f1_score(y_true, y_pred, average="weighted", zero_division=0),
+        "precision": precision_score(y_true, y_pred, average="weighted", zero_division=0),
+        "recall": recall_score(y_true, y_pred, average="weighted", zero_division=0),
+
+        "f1_macro": f1_score(y_true, y_pred, average="macro", zero_division=0),
+        "f1_micro": f1_score(y_true, y_pred, average="micro", zero_division=0),
+        "f1_weighted": f1_score(y_true, y_pred, average="weighted", zero_division=0),
+
+        "precision_macro": precision_score(y_true, y_pred, average="macro", zero_division=0),
+        "precision_micro": precision_score(y_true, y_pred, average="micro", zero_division=0),
+        "precision_weighted": precision_score(y_true, y_pred, average="weighted", zero_division=0),
+
+        "recall_macro": recall_score(y_true, y_pred, average="macro", zero_division=0),
+        "recall_micro": recall_score(y_true, y_pred, average="micro", zero_division=0),
+        "recall_weighted": recall_score(y_true, y_pred, average="weighted", zero_division=0),
+    }
+
+
+#
+def compute_bootstrap_metrics_from_predictions(
+    y_true,
+    y_pred,
+    n_iter=200,
+    seed=12345,
+):
+    """
+    Bootstrap accuracy and weighted F1 confidence intervals.
+
+    The model is NOT refit.
+    We bootstrap fixed predictions by resampling evaluation indices.
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    rng = np.random.RandomState(seed)
+    idx = np.arange(y_true.shape[0])
+
+    bootstrap_accuracies = []
+    bootstrap_f1_weighted_scores = []
+
+    for _ in range(n_iter):
+        sample_idx = rng.choice(idx, size=idx.shape[0], replace=True)
+
+        y_boot = y_true[sample_idx]
+        pred_boot = y_pred[sample_idx]
+
+        bootstrap_accuracies.append(accuracy_score(y_boot, pred_boot))
+        bootstrap_f1_weighted_scores.append(
+            f1_score(
+                y_boot,
+                pred_boot,
+                average="weighted",
+                zero_division=0,
+            )
+        )
+
+    bootstrap_accuracies = np.asarray(bootstrap_accuracies)
+    bootstrap_f1_weighted_scores = np.asarray(bootstrap_f1_weighted_scores)
+
+    return {
+        "bootstrap_accuracy_original": accuracy_score(y_true, y_pred),
+        "bootstrap_accuracy_mean": float(np.mean(bootstrap_accuracies)),
+        "bootstrap_accuracy_ci_lower": float(np.percentile(bootstrap_accuracies, 2.5)),
+        "bootstrap_accuracy_ci_upper": float(np.percentile(bootstrap_accuracies, 97.5)),
+
+        "bootstrap_f1_weighted_original": f1_score(
+            y_true,
+            y_pred,
+            average="weighted",
+            zero_division=0,
+        ),
+        "bootstrap_f1_weighted_mean": float(np.mean(bootstrap_f1_weighted_scores)),
+        "bootstrap_f1_weighted_ci_lower": float(np.percentile(bootstrap_f1_weighted_scores, 2.5)),
+        "bootstrap_f1_weighted_ci_upper": float(np.percentile(bootstrap_f1_weighted_scores, 97.5)),
+
+        "bootstrap_n_iter": n_iter,
+        "bootstrap_seed": seed,
+    }
+
+
+
 
 
 ### util functions for sklearn tree evaluation
