@@ -4,7 +4,7 @@
     "random_state": 42,
     "data_dir": "../data/data_splitted",
     "model_dir": "../experiments/CART/models",
-    "results_dir": "../data/CART/results",
+    "results_dir": "../experiments/CART/results",
     "max_depths": [
         2,
         3,
