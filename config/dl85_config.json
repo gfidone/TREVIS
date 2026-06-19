@@ -2,10 +2,10 @@
     "dataset_name": "heloc",
     "precision": 4,
     "random_state": 42,
-    "data_dir": "../data/data_splitted_binarized",
+    "data_dir": "../data/data_splitted_discretized",
     "gbdt_hyperparam_dir": "../data/gbdt_guesses_hyperparam",
-    "models_dir": "../experiments/dl85/models_bootstrap",
-    "results_dir": "../experiments/dl85/results_bootstrap",
+    "models_dir": "../experiments/dl85/models",
+    "results_dir": "../experiments/dl85/results",
     "max_depths": [
         3,
         4,
