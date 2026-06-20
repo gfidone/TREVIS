@@ -52,6 +52,7 @@ We compare against the following competitors. Please refer to the corresponding 
 - `FlowOCT`: [ODTLearn FlowOCT implementation](https://github.com/D3M-Research-Group/odtlearn/blob/main/odtlearn/flow_oct.py)
 - `CART`: [Scikit-learn DecisionTreeClassifier](https://scikit-learn.org/stable/modules/generated/sklearn.tree.DecisionTreeClassifier.html)
 
+You can run the experiments for the competitors using the scripts in `competitors` folder. Also in this case, modify the config appropriately when in need of using models with respect to original or discretized features.
 
 # Data
 
