@@ -73,7 +73,7 @@ def split_seqs(seqs, train_size):
 
 if __name__ == '__main__':
 
-    with open('../config/ttvae_train.json', 'r') as file:
+    with open('../config/ttvae_train_config.json', 'r') as file:
          config = json.load(file)
 
     device = config['device']
