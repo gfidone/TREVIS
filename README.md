@@ -12,7 +12,7 @@ To run TREVIS, follow these steps:
 2. **Fit random train DTS**. Edit the `config/random_trees_config.json` file with your preferred configuration and run:
 
    ```bash
-    python3 scripts/random_trees_.py 
+    python3 scripts/random_trees.py 
     ```
 4. **Tokenize random DTs**. Edit the `config/tokenize_config.json` file with your preferred configuration and run:
 
