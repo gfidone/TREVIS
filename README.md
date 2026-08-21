@@ -22,7 +22,7 @@ To run TREVIS, follow these steps:
 5. **Train the TTVAE**. Edit the `config/train_ttvae_config.json` file with your preferred configuration and run:
 
     ```bash
-    python3 scripts/train_ttvae.py 
+    python3 scripts/ttvae_train.py 
     ```
 
 7. **Optimize via gradient ascent**. Edit the `config/gradient_config.json` file with your preferred configuration and run:
