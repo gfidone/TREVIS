@@ -4,8 +4,8 @@ from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_score, recall_score, matthews_corrcoef, cohen_kappa_score, confusion_matrix, classification_report
 from sklearn.tree import DecisionTreeClassifier, export_text
-from trainer_v2_fidone import TTVAETrainer
-from model_v2 import TTVAE
+from trainer import TTVAETrainer
+from model import TTVAE
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 pd.set_option("display.max_columns", None)
