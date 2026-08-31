@@ -1,22 +1,18 @@
-import os, re, json, time, pickle, joblib, argparse
-import numpy as np
-import pandas as pd
-import torch
-import torch.nn as nn
-
+import os, re, json, time, pickle, shutil, joblib, argparse
+import numpy as np, pandas as pd, torch, torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
-from sklearn.tree import DecisionTreeClassifier
-
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, precision_score, recall_score, matthews_corrcoef, cohen_kappa_score, confusion_matrix, classification_report
+from sklearn.tree import DecisionTreeClassifier, export_text
 from trainer_v2_fidone import TTVAETrainer
 from model_v2 import TTVAE
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+pd.set_option("display.max_columns", None)
 
 
 # ============================================================
-# Arguments
+# ARGUMENTS
 # ============================================================
 def str2bool(v):
     if isinstance(v, bool): return v
@@ -24,28 +20,29 @@ def str2bool(v):
     if v.lower() in ("no", "false", "f", "0", "n"): return False
     raise argparse.ArgumentTypeError("Boolean value expected.")
 
-
 parser = argparse.ArgumentParser()
-parser.add_argument("--dataset_name", type=str, required=True)
-parser.add_argument("--config_path", type=str, default="ttvae_config.json")
 
-parser.add_argument("--size_of_trees", type=int, default=20000)
-parser.add_argument("--patience", type=int, default=1)
+for name, default, dtype in [
+    ("config_path", "ttvae_config.json", str), ("patience", 1, int),
+    ("abs_pos_enc", "tree", str), ("size_of_trees", 20000, int),
+    ("beta_epoch", 10, int), ("start_early_stop", 0, int),
+    ("dropout", 0.0, float), ("learning_rate", 0.001, float),
+    ("early_stopping", True, str2bool)
+]:
+    parser.add_argument(f"--{name}", type=dtype, default=default)
+
+parser.add_argument("--dataset_name", required=True)
 parser.add_argument("--min_delta", type=float, default=0.1)
 parser.add_argument("--free_bits", type=float, default=0.0)
-parser.add_argument("--abs_pos_enc", type=str, default="tree")
-
-parser.add_argument("--reference_metric", type=str, default="accuracy",
-                    choices=["accuracy", "balanced_accuracy", "f1_macro", "f1_weighted"])
-parser.add_argument("--regularizations", type=float, nargs="+",
-                    default=[0.0, 0.0001, 0.0005, 0.001, 0.005, 0.01])
+parser.add_argument("--reference_metric", default="f1_weighted", choices=["accuracy", "balanced_accuracy", "f1_macro", "f1_weighted"])
+parser.add_argument("--regularizations", type=float, nargs="+", default=[0.0, 0.001, 0.005, 0.0001, 0.0005, 0.01])
 
 parser.add_argument("--bo_rand_start", type=int, default=1)
 parser.add_argument("--bo_rand_end", type=int, default=1)
 parser.add_argument("--bo_iterations", type=int, default=10)
 parser.add_argument("--candidate_batch_size", type=int, default=50)
 parser.add_argument("--n_grid", type=int, default=5000)
-parser.add_argument("--sample_dist", type=str, default="normal", choices=["normal", "uniform"])
+parser.add_argument("--sample_dist", default="standard_normal", choices=["standard_normal", "normal", "uniform"])
 parser.add_argument("--grad_ascent", type=str2bool, default=True)
 parser.add_argument("--ga_lr", type=float, default=0.001)
 parser.add_argument("--ga_steps", type=int, default=10)
@@ -56,634 +53,763 @@ parser.add_argument("--mlp_hidden_dim", type=int, default=128)
 parser.add_argument("--mlp_lr", type=float, default=1e-3)
 parser.add_argument("--mlp_weight_decay", type=float, default=1e-5)
 
+parser.add_argument("--results_root", default="trevis_paper_results")
+parser.add_argument("--save_predictions", type=str2bool, default=True)
+parser.add_argument("--save_tree_text", type=str2bool, default=True)
 parser.add_argument("--bootstrap_n_iter", type=int, default=200)
 parser.add_argument("--bootstrap_seed", type=int, default=12345)
-parser.add_argument("--results_root", type=str, default="trevis_paper_results")
-parser.add_argument("--save_models", type=str2bool, default=True)
+parser.add_argument("--bootstrap_results_root", default=None)
 args = parser.parse_args()
 
-
-PRECISION = 4
-TREE_DIR = "linearized_trees_binarized"
-TREE_PERF_DIR = "linearized_trees_binarized_performance"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DATASET, SIZE, N_GRID, METRIC = args.dataset_name, int(args.size_of_trees), int(args.n_grid), args.reference_metric
+PRECISION, TREE_DIR, PERF_DIR = 4, "linearized_trees_binarized", "linearized_trees_binarized_performance"
+SIZE_TAG, GRID_TAG = f"size_of_trees_{SIZE}", f"n_grid_{N_GRID}"
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 # ============================================================
-# Checkpoint
+# HELPERS
 # ============================================================
-def build_checkpoint_path(dataset, train_size):
+def lambda_tag(x): return str(x).replace("-", "m").replace(".", "p")
+
+def run_tag(req, eff, rand):
+    return f"{SIZE_TAG}_{GRID_TAG}_lambda_requested_{lambda_tag(req)}_effective_{lambda_tag(eff)}_rand_idx_{rand}"
+
+def checkpoint_path():
     return (
-        f"binarized_FULL_models_checkpoints_dataset_size20k_upd/{dataset}/threshold_tree_False/"
+        f"binarized_FULL_models_checkpoints_dataset_size20k_upd/{DATASET}/threshold_tree_False/"
         "config_d_model_encoder_120_num_layers_encoder_2_num_heads_encoder_2_"
         "early_stopping_True_epochs_50_beta_start_0.0_beta_epoch_10_beta_eval_1.0_"
-        f"patience_1_min_delta_0.1_train_size_{train_size}.pt"
+        f"patience_1_min_delta_0.1_train_size_{SIZE}.pt"
     )
 
+def metadata(path): return {"size_of_trees": SIZE, "checkpoint_train_size": SIZE, "n_grid": N_GRID, "checkpoint_path": path}
 
-def parse_checkpoint_name(path):
-    filename = os.path.basename(path).replace(".pt", "")
+def save_json(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f: json.dump(obj, f, indent=2, default=str)
+
+def flatten_csv(d):
+    return {k: json.dumps(v, default=str) if isinstance(v, (dict, list, tuple, np.ndarray)) else v.item() if isinstance(v, (np.integer, np.floating)) else v for k, v in d.items()}
+
+def load_pickle(path):
+    if not os.path.exists(path): return None
+    with open(path, "rb") as f: return pickle.load(f)
+
+def copy_if_exists(src, dst):
+    if not os.path.exists(src): return False
+    os.makedirs(os.path.dirname(dst), exist_ok=True); shutil.copy2(src, dst); return True
+
+def safe_tree_text(clf, feature_names=None):
+    try: return export_text(clf, feature_names=feature_names) if hasattr(clf, "tree_") else str(clf)
+    except Exception as e: return f"Could not export tree text: {e}\n\n{clf}"
+
+
+# ============================================================
+# CHECKPOINT
+# ============================================================
+def parse_checkpoint(path):
+    name = os.path.basename(path).replace(".pt", "")
     patterns = {
-        "d_model_encoder": r"d_model_encoder_(\d+)",
-        "d_model_decoder": r"d_model_decoder_(\d+)",
-        "num_layers_encoder": r"num_layers_encoder_(\d+)",
-        "num_layers_decoder": r"num_layers_decoder_(\d+)",
-        "num_heads_encoder": r"num_heads_encoder_(\d+)",
-        "num_heads_decoder": r"num_heads_decoder_(\d+)",
-        "epochs": r"epochs_(\d+)",
-        "beta_start": r"beta_start_([\d.]+)",
-        "beta_epoch": r"beta_epoch_(\d+)",
-        "beta_eval": r"beta_eval_([\d.]+)",
-        "patience": r"patience_(\d+)",
-        "min_delta": r"min_delta_([\d.]+)",
-        "train_size": r"train_size_(\d+)",
+        "d_model_encoder": r"d_model_encoder_(\d+)", "d_model_decoder": r"d_model_decoder_(\d+)",
+        "num_layers_encoder": r"num_layers_encoder_(\d+)", "num_layers_decoder": r"num_layers_decoder_(\d+)",
+        "num_heads_encoder": r"num_heads_encoder_(\d+)", "num_heads_decoder": r"num_heads_decoder_(\d+)",
+        "early_stopping": r"early_stopping_(True|False)", "epochs": r"epochs_(\d+)",
+        "beta_start": r"beta_start_([\d.]+)", "beta_epoch": r"beta_epoch_(\d+)",
+        "beta_eval": r"beta_eval_([\d.]+)", "patience": r"patience_(\d+)",
+        "min_delta": r"min_delta_([\d.]+)", "train_size": r"train_size_(\d+)"
     }
 
-    config = {}
+    cfg = {}
     for key, pattern in patterns.items():
-        match = re.search(pattern, filename)
-        if match:
-            value = match.group(1)
-            config[key] = float(value) if "." in value else int(value)
+        m = re.search(pattern, name)
+        if not m: continue
+        v = m.group(1)
+        cfg[key] = v == "True" if v in ("True", "False") else float(v) if "." in v else int(v)
 
-    for enc, dec in [
-        ("d_model_encoder", "d_model_decoder"),
-        ("num_layers_encoder", "num_layers_decoder"),
-        ("num_heads_encoder", "num_heads_decoder"),
-    ]:
-        if enc in config and dec not in config: config[dec] = config[enc]
-
-    return config
-
-
-def get_ttvae_training_time(checkpoint):
-    for key in ["training_time_seconds", "train_time_seconds", "training_time",
-                "train_time", "total_training_time", "total_train_time"]:
-        if key in checkpoint:
-            try: return float(checkpoint[key])
-            except (TypeError, ValueError): pass
-    return np.nan
+    for enc, dec in [("d_model_encoder", "d_model_decoder"), ("num_layers_encoder", "num_layers_decoder"), ("num_heads_encoder", "num_heads_decoder")]:
+        cfg.setdefault(dec, cfg.get(enc))
+    return cfg
 
 
 # ============================================================
-# Data / latent helpers
+# DATA / LATENTS
 # ============================================================
-def split_tree_sequences(sequences, train_size):
-    train, test = train_test_split(sequences, test_size=20000, random_state=42)
+def split_seqs(seqs):
+    train, test = train_test_split(seqs, test_size=20000, random_state=42)
     train, val = train_test_split(train, test_size=10000, random_state=42)
-    train, early_stop = train_test_split(train, test_size=10000, random_state=42)
-    return train[:train_size], test, val, early_stop
-
+    train, es = train_test_split(train, test_size=10000, random_state=42)
+    return train[:SIZE], test, val, es
 
 def extract_latents(model, trainer, dataset, batch_size=128):
-    model.eval()
-    latents = []
-
+    model.eval(); mus = []
     with torch.no_grad():
-        for start in range(0, len(dataset), batch_size):
-            batch = trainer.collate_fn(dataset[start:start + batch_size])
-            batch = {k: v.to(model.device) if not isinstance(v, list) else v
-                     for k, v in batch.items()}
-
+        for i in range(0, len(dataset), batch_size):
+            batch = trainer.collate_fn(dataset[i:i + batch_size])
+            batch = {k: v.to(model.device) if not isinstance(v, list) else v for k, v in batch.items()}
             _, mu, _, _ = model.encode(batch["src"], batch["src_abs_encs"], batch["src_rel_encs"])
-            latents.append(mu.detach().cpu().numpy())
-
-    return np.concatenate(latents, axis=0)
-
+            mus.append(mu.cpu().numpy())
+    return np.concatenate(mus)
 
 def decode_latent(trainer, z):
-    model = trainer.model
-    model.eval()
-
-    z = torch.as_tensor(z, dtype=torch.float32, device=model.device).detach()
+    z = torch.as_tensor(z, dtype=torch.float32, device=trainer.model.device)
     if z.ndim == 1: z = z.unsqueeze(0)
-
-    with torch.no_grad():
-        return model.generate(z=z, use_cache=False, do_sample=False)
+    with torch.no_grad(): return trainer.model.generate(z=z, use_cache=False, do_sample=False)
 
 
 # ============================================================
-# Surrogate g
+# MLP
 # ============================================================
 class MLPPredictor(nn.Module):
-    def __init__(self, input_dim, hidden_dim=128, lr=1e-3, weight_decay=1e-5, device=None):
+    def __init__(self, input_dim):
         super().__init__()
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.net = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.Tanh(), nn.Linear(hidden_dim, 1))
+        self.device = trainer.model.device
+        self.net = nn.Sequential(nn.Linear(input_dim, args.mlp_hidden_dim), nn.Tanh(), nn.Linear(args.mlp_hidden_dim, 1))
+        self.loss_fn = nn.MSELoss(reduction="sum")
         self.to(self.device)
-        self.optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=weight_decay)
-        self.loss_fn = nn.MSELoss()
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=args.mlp_lr, weight_decay=args.mlp_weight_decay)
 
-    def forward(self, x):
-        return self.net(x)
+    def forward(self, x): return self.net(x)
 
-    def fit(self, X, y, epochs, batch_size):
+    def fit(self, X, y, X_test=None, y_test=None):
         X = torch.tensor(X, dtype=torch.float32, device=self.device)
         y = torch.tensor(y, dtype=torch.float32, device=self.device).reshape(-1, 1)
-        loader = DataLoader(TensorDataset(X, y), batch_size=batch_size, shuffle=True)
+        loader = DataLoader(TensorDataset(X, y), batch_size=args.mlp_batch_size, shuffle=True)
 
-        for _ in range(epochs):
+        for epoch in range(args.mlp_epochs):
             self.train()
             for xb, yb in loader:
                 self.optimizer.zero_grad()
-                loss = self.loss_fn(self(xb), yb)
-                loss.backward()
-                self.optimizer.step()
-        return self
+                loss = self.loss_fn(self(xb), yb) / xb.shape[0]
+                loss.backward(); self.optimizer.step()
+
+            if epoch % 50 == 0 or epoch == args.mlp_epochs - 1:
+                tr = self.metrics(X, y)
+                msg = f"Epoch {epoch:04d} | train MSE={tr['mse']:.4f} RMSE={tr['rmse']:.4f} Pearson={tr['pearson']:.4f}"
+                if X_test is not None:
+                    te = self.metrics(X_test, y_test)
+                    msg += f" | test MSE={te['mse']:.4f} RMSE={te['rmse']:.4f} Pearson={te['pearson']:.4f}"
+                print(msg)
 
     def predict(self, X):
-        self.eval()
-        X = torch.as_tensor(X, dtype=torch.float32, device=self.device)
-        with torch.no_grad():
-            return self(X).detach().cpu().numpy().reshape(-1)
+        self.eval(); X = torch.as_tensor(X, dtype=torch.float32, device=self.device)
+        with torch.no_grad(): return self(X).cpu().numpy()
 
     def metrics(self, X, y):
-        pred, y = self.predict(X), np.asarray(y).reshape(-1)
-        mse = np.mean((pred - y) ** 2)
-        pearson = np.nan if np.std(pred) == 0 or np.std(y) == 0 else np.corrcoef(pred, y)[0, 1]
-        return {"mse": float(mse), "rmse": float(np.sqrt(mse)), "pearson": float(pearson)}
+        self.eval()
+        X = torch.as_tensor(X, dtype=torch.float32, device=self.device)
+        y = torch.as_tensor(y, dtype=torch.float32, device=self.device).reshape(-1, 1)
+
+        with torch.no_grad():
+            pred = self(X); mse = torch.mean((pred - y) ** 2)
+            p, t = pred.flatten(), y.flatten()
+            p, t = p - p.mean(), t - t.mean()
+            pearson = torch.sum(p * t) / (torch.sqrt(torch.sum(p ** 2)) * torch.sqrt(torch.sum(t ** 2)) + 1e-8)
+
+        return {"mse": mse.item(), "rmse": torch.sqrt(mse).item(), "pearson": pearson.item()}
 
 
 # ============================================================
-# Metrics / objective
+# METRICS / OBJECTIVE
 # ============================================================
-def reference_metric(y_true, y_pred, metric):
-    if metric == "accuracy": return accuracy_score(y_true, y_pred)
-    if metric == "balanced_accuracy": return balanced_accuracy_score(y_true, y_pred)
-    if metric == "f1_macro": return f1_score(y_true, y_pred, average="macro", zero_division=0)
-    if metric == "f1_weighted": return f1_score(y_true, y_pred, average="weighted", zero_division=0)
-    raise ValueError(metric)
-
+def reference_metric(y_true, y_pred):
+    if METRIC == "accuracy": return accuracy_score(y_true, y_pred)
+    if METRIC == "balanced_accuracy": return balanced_accuracy_score(y_true, y_pred)
+    if METRIC == "f1_macro": return f1_score(y_true, y_pred, average="macro", zero_division=0)
+    return f1_score(y_true, y_pred, average="weighted", zero_division=0)
 
 def tree_leaves(clf):
     if hasattr(clf, "get_n_leaves"): return int(clf.get_n_leaves())
     if hasattr(clf, "n_leaves"): return int(clf.n_leaves)
     raise AttributeError("Cannot determine number of leaves.")
 
-
 def tree_depth(clf):
     if hasattr(clf, "get_depth"): return int(clf.get_depth())
     if hasattr(clf, "max_depth"): return int(clf.max_depth)
-    return np.nan
+    return None
+
+def tree_nodes(clf):
+    if hasattr(clf, "get_n_nodes"): return int(clf.get_n_nodes())
+    if hasattr(clf, "tree_"): return int(clf.tree_.node_count)
+    return None
+
+def objective(metric_value, leaves, lam): return 1.0 - float(metric_value) + float(lam) * int(leaves)
+
+def effective_lambda(requested):
+    cap = 1.0 / len(X_train); effective = min(float(requested), cap)
+    return effective, cap, effective < requested
+
+def metric_from_perf(perf):
+    if METRIC == "accuracy": return perf["train_accuracy"]
+    if METRIC == "balanced_accuracy": return perf.get("train_balanced_accuracy", perf["train_accuracy"])
+    if METRIC == "f1_macro": return perf["train_f1_macro"]
+    return perf.get("train_f1_weighted", perf["train_f1_macro"])
+
+def classification_metrics(y_true, y_pred, prefix):
+    labels = np.unique(np.r_[y_true, y_pred])
+    out = {
+        f"{prefix}_accuracy": accuracy_score(y_true, y_pred),
+        f"{prefix}_balanced_accuracy": balanced_accuracy_score(y_true, y_pred),
+        f"{prefix}_mcc": matthews_corrcoef(y_true, y_pred),
+        f"{prefix}_cohen_kappa": cohen_kappa_score(y_true, y_pred),
+        f"{prefix}_labels": labels.tolist(),
+        f"{prefix}_confusion_matrix": confusion_matrix(y_true, y_pred, labels=labels).tolist(),
+        f"{prefix}_classification_report": classification_report(y_true, y_pred, zero_division=0, output_dict=True)
+    }
+
+    for avg in ("macro", "micro", "weighted"):
+        out[f"{prefix}_f1_{avg}"] = f1_score(y_true, y_pred, average=avg, zero_division=0)
+        out[f"{prefix}_precision_{avg}"] = precision_score(y_true, y_pred, average=avg, zero_division=0)
+        out[f"{prefix}_recall_{avg}"] = recall_score(y_true, y_pred, average=avg, zero_division=0)
+    return out
 
 
-def regularized_objective(metric_value, n_leaves, lambda_reg):
-    return 1.0 - float(metric_value) + float(lambda_reg) * int(n_leaves)
-
-
-def effective_lambda(requested_lambda, train_sample_size):
-    return min(float(requested_lambda), 1.0 / float(train_sample_size))
-
-
-def training_metric_from_perf(perf, metric):
-    if metric == "accuracy": return perf["train_accuracy"]
-    if metric == "balanced_accuracy":
-        return perf.get("train_balanced_accuracy", perf["train_accuracy"])
-    if metric == "f1_macro": return perf["train_f1_macro"]
-    if metric == "f1_weighted":
-        return perf.get("train_f1_weighted", perf["train_f1_macro"])
-    raise ValueError(metric)
-
-
-def bootstrap_weighted_f1(y_true, y_pred, n_iter=200, seed=12345):
+# ============================================================
+# BOOTSTRAP
+# ============================================================
+def bootstrap_metrics(y_true, y_pred, prefix):
     y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
-    rng, n = np.random.RandomState(seed), len(y_true)
-    values = np.empty(n_iter)
+    rng = np.random.RandomState(args.bootstrap_seed)
+    acc, f1w = [], []
 
-    for i in range(n_iter):
-        idx = rng.randint(0, n, size=n)
-        values[i] = f1_score(y_true[idx], y_pred[idx], average="weighted", zero_division=0)
+    for _ in range(args.bootstrap_n_iter):
+        idx = rng.choice(len(y_true), len(y_true), replace=True)
+        acc.append(accuracy_score(y_true[idx], y_pred[idx]))
+        f1w.append(f1_score(y_true[idx], y_pred[idx], average="weighted", zero_division=0))
+
+    acc, f1w = np.asarray(acc), np.asarray(f1w)
+    out = {}
+
+    for name, values, original in [
+        ("accuracy", acc, accuracy_score(y_true, y_pred)),
+        ("f1_weighted", f1w, f1_score(y_true, y_pred, average="weighted", zero_division=0))
+    ]:
+        out.update({
+            f"{prefix}_bootstrap_{name}_original": float(original),
+            f"{prefix}_bootstrap_{name}_mean": float(values.mean()),
+            f"{prefix}_bootstrap_{name}_ci_lower": float(np.percentile(values, 2.5)),
+            f"{prefix}_bootstrap_{name}_ci_upper": float(np.percentile(values, 97.5))
+        })
+
+    out.update({f"{prefix}_bootstrap_n_iter": args.bootstrap_n_iter, f"{prefix}_bootstrap_seed": args.bootstrap_seed})
+    return out
+
+def add_bootstrap(row, trevis, baseline):
+    for prefix, clf in [("bayesian_pruned", trevis), ("baseline", baseline)]:
+        for split, X, y in [("val", X_val, y_val), ("test", X_test, y_test)]:
+            row.update(bootstrap_metrics(y, clf.predict(X), f"{prefix}_{split}"))
+
+    row.update({"bootstrap_status": "ok", "bootstrap_n_iter": args.bootstrap_n_iter, "bootstrap_seed": args.bootstrap_seed})
+    return row
+
+
+# ============================================================
+# EVALUATION
+# ============================================================
+DATASETS = {}
+
+def evaluate_classifier(clf, prefix, lam):
+    pred = {s: clf.predict(X) for s, (X, _) in DATASETS.items()}
+    leaves = tree_leaves(clf)
+    refs = {s: reference_metric(DATASETS[s][1], pred[s]) for s in DATASETS}
+    metrics = {}
+
+    for s in DATASETS: metrics.update(classification_metrics(DATASETS[s][1], pred[s], f"{prefix}_{s}"))
 
     return {
-        "test_f1_weighted": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
-        "test_f1_weighted_bootstrap_mean": float(values.mean()),
-        "test_f1_weighted_bootstrap_std": float(values.std()),
-        "test_f1_weighted_bootstrap_ci_low": float(np.percentile(values, 2.5)),
-        "test_f1_weighted_bootstrap_ci_high": float(np.percentile(values, 97.5)),
+        "pred": pred,
+        "ref": refs,
+        "obj": {s: objective(refs[s], leaves, lam) for s in DATASETS},
+        "depth": tree_depth(clf),
+        "leaves": leaves,
+        "nodes": tree_nodes(clf),
+        "metrics": metrics
     }
 
+def evaluation_to_row(trevis_eval, baseline_eval):
+    row = {}
+
+    for prefix, ev in [("bayesian_pruned", trevis_eval), ("baseline", baseline_eval)]:
+        for split in ("train", "val", "test"):
+            row[f"{prefix}_{split}_reference_metric"] = ev["ref"][split]
+            row[f"{prefix}_{split}_regularized_objective"] = ev["obj"][split]
+
+    row.update({
+        "pruned_depth": trevis_eval["depth"], "pruned_n_leaves": trevis_eval["leaves"], "pruned_n_nodes": trevis_eval["nodes"],
+        "baseline_depth": baseline_eval["depth"], "baseline_n_leaves": baseline_eval["leaves"], "baseline_n_nodes": baseline_eval["nodes"]
+    })
+    row.update(trevis_eval["metrics"]); row.update(baseline_eval["metrics"])
+    return row
+
 
 # ============================================================
-# CART
+# RESULT MATCHING
 # ============================================================
-def tune_cart(X_train, y_train, X_val, y_val, X_test, y_test, lambda_grid):
-    start = time.time()
-    best_clf, best_val_f1, best_params = None, -np.inf, None
-    n_train = len(X_train)
+RUN_COLUMNS = {"rand_idx", "requested_lambda_reg", "effective_lambda_reg", "reference_metric", "size_of_trees", "n_grid"}
 
-    for lam in lambda_grid:
-        min_leaf = max(1, int(np.ceil(lam * n_train)))
-
-        for alpha in [0.0, 0.01, 0.1]:
-            for depth in [2, 3, 4, 5]:
-                clf = DecisionTreeClassifier(
-                    max_depth=depth, ccp_alpha=alpha,
-                    min_samples_leaf=min_leaf, random_state=42
-                )
-                clf.fit(X_train, y_train)
-                val_f1 = f1_score(y_val, clf.predict(X_val), average="weighted", zero_division=0)
-
-                if val_f1 > best_val_f1:
-                    best_clf, best_val_f1 = clf, val_f1
-                    best_params = {
-                        "cart_lambda_support": lam,
-                        "cart_min_samples_leaf": min_leaf,
-                        "cart_ccp_alpha": alpha,
-                        "cart_max_depth": depth,
-                    }
-
-    elapsed = time.time() - start
-    metrics = bootstrap_weighted_f1(
-        y_test, best_clf.predict(X_test),
-        args.bootstrap_n_iter, args.bootstrap_seed
+def run_mask(df, rand, requested, effective):
+    return (
+        (df["rand_idx"].astype(int) == rand)
+        & np.isclose(df["requested_lambda_reg"].astype(float), requested, atol=1e-12)
+        & np.isclose(df["effective_lambda_reg"].astype(float), effective, atol=1e-12)
+        & (df["reference_metric"] == METRIC)
+        & (df["size_of_trees"].astype(int) == SIZE)
+        & (df["n_grid"].astype(int) == N_GRID)
     )
 
-    result = {
-        "cart_val_f1_weighted": best_val_f1,
-        "cart_test_f1_weighted": metrics["test_f1_weighted"],
-        "cart_test_f1_weighted_bootstrap_mean": metrics["test_f1_weighted_bootstrap_mean"],
-        "cart_test_f1_weighted_bootstrap_std": metrics["test_f1_weighted_bootstrap_std"],
-        "cart_test_f1_weighted_bootstrap_ci_low": metrics["test_f1_weighted_bootstrap_ci_low"],
-        "cart_test_f1_weighted_bootstrap_ci_high": metrics["test_f1_weighted_bootstrap_ci_high"],
-        "cart_num_leaves": tree_leaves(best_clf),
-        "cart_depth": tree_depth(best_clf),
-        "cart_training_time_seconds": elapsed,
-        **best_params,
-    }
-    return best_clf, result
+def find_existing(df, rand, requested, effective):
+    if df.empty or not RUN_COLUMNS.issubset(df.columns): return None
+    m = run_mask(df, rand, requested, effective)
+    return df.loc[m].iloc[-1].to_dict() if m.any() else None
 
-
-def save_result_row(path, row):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    new = pd.DataFrame([row])
-
-    if os.path.exists(path):
-        old = pd.read_csv(path)
-
-        required = ["dataset", "requested_lambda", "effective_lambda",
-                    "rand_idx", "size_of_trees", "n_grid"]
-
-        if all(c in old.columns for c in required):
-            same = (
-                (old["dataset"] == row["dataset"])
-                & np.isclose(old["requested_lambda"], row["requested_lambda"])
-                & np.isclose(old["effective_lambda"], row["effective_lambda"])
-                & (old["rand_idx"] == row["rand_idx"])
-                & (old["size_of_trees"] == row["size_of_trees"])
-                & (old["n_grid"] == row["n_grid"])
-            )
-            old = old.loc[~same]
-
-        new = pd.concat([old, new], ignore_index=True)
-
-    new.to_csv(path, index=False)
+def save_result(path, row, rand, requested, effective):
+    old = pd.read_csv(path) if os.path.exists(path) else pd.DataFrame()
+    if not old.empty and RUN_COLUMNS.issubset(old.columns): old = old.loc[~run_mask(old, rand, requested, effective)]
+    pd.concat([old, pd.DataFrame([row])], ignore_index=True).to_csv(path, index=False)
 
 
 # ============================================================
-# Load data
+# DATA
 # ============================================================
-dataset = args.dataset_name
-data = pd.read_csv(f"TITAN/data/data_splitted_binarized/{dataset}.csv")
+path = checkpoint_path()
+if not os.path.exists(path): raise FileNotFoundError(f"Checkpoint not found: {path}")
 
-train = data[data.split == "train"].drop(columns="split")
-val = data[data.split == "val"].drop(columns="split")
-test = data[data.split == "test"].drop(columns="split")
+data = pd.read_csv(f"TITAN/data/data_splitted_binarized/{DATASET}.csv")
+splits = {s: data[data.split == s].drop(columns="split") for s in ("train", "val", "test")}
 
-X_train, y_train = train.drop(columns="target").round(PRECISION), train["target"]
-X_val, y_val = val.drop(columns="target").round(PRECISION), val["target"]
-X_test, y_test = test.drop(columns="target").round(PRECISION), test["target"]
-n_train_samples = len(X_train)
+X_train, y_train = splits["train"].drop(columns="target").round(PRECISION), splits["train"]["target"]
+X_val, y_val = splits["val"].drop(columns="target").round(PRECISION), splits["val"]["target"]
+X_test, y_test = splits["test"].drop(columns="target").round(PRECISION), splits["test"]["target"]
 
-trees_seq = joblib.load(f"{TREE_DIR}/{dataset}.joblib")
-trees_seq_perf = joblib.load(f"{TREE_PERF_DIR}/{dataset}.joblib")
+DATASETS.update({"train": (X_train, y_train), "val": (X_val, y_val), "test": (X_test, y_test)})
+feature_names = list(X_train.columns)
 
-train_seqs, test_seqs, val_seqs, es_seqs = split_tree_sequences(
-    trees_seq, args.size_of_trees
-)
-train_seqs_perf, _, _, _ = split_tree_sequences(
-    trees_seq_perf, args.size_of_trees
-)
+trees = joblib.load(f"{TREE_DIR}/{DATASET}.joblib")
+trees_perf = joblib.load(f"{PERF_DIR}/{DATASET}.joblib")
+train_seqs, test_seqs, val_seqs, es_seqs = split_seqs(trees)
+train_seqs_perf, _, _, _ = split_seqs(trees_perf)
 
-with open(f"{TREE_DIR}/te_encoders_binarized/{dataset}.pkl", "rb") as f:
-    te = pickle.load(f)
+with open(f"{TREE_DIR}/te_encoders_binarized/{DATASET}.pkl", "rb") as f: te = pickle.load(f)
 
 
 # ============================================================
 # TTVAE
 # ============================================================
-checkpoint_path = build_checkpoint_path(dataset, args.size_of_trees)
-if not os.path.exists(checkpoint_path):
-    raise FileNotFoundError(f"Checkpoint not found:\n{checkpoint_path}")
+cfg = parse_checkpoint(path)
 
-with open(args.config_path) as f:
-    config = json.load(f)
+with open(args.config_path) as f: config = json.load(f)
 
-config.update(parse_checkpoint_name(checkpoint_path))
+config.update(cfg)
 config.update({
-    "dataset": dataset,
-    "patience": args.patience,
-    "min_delta": args.min_delta,
-    "free_bits": args.free_bits,
-    "abs_pos_enc": args.abs_pos_enc,
-    "num_scales": 10,
-    "start_early_stop": 10,
+    "dataset": DATASET, "patience": args.patience, "min_delta": args.min_delta,
+    "free_bits": args.free_bits, "abs_pos_enc": args.abs_pos_enc,
+    "num_scales": 10, "start_early_stop": 10,
+    "size_of_trees": SIZE, "checkpoint_train_size": SIZE, "n_grid": N_GRID
 })
 
 model = TTVAE(
-    tree_encoder=te,
-    max_depth=config["max_depth"],
-    d_model_encoder=config["d_model_encoder"],
-    d_model_decoder=config["d_model_decoder"],
-    num_heads_encoder=config["num_heads_encoder"],
-    num_heads_decoder=config["num_heads_decoder"],
-    num_layers_encoder=config["num_layers_encoder"],
-    num_layers_decoder=config["num_layers_decoder"],
-    d_ff_encoder=config["d_ff_encoder"],
-    d_ff_decoder=config["d_ff_decoder"],
-    dropout_encoder=config["dropout_encoder"],
-    dropout_decoder=config["dropout_decoder"],
-    abs_pos_enc=config["abs_pos_enc"],
-    rel_pos_enc=config["rel_pos_enc"],
-    latent_dim=config["latent_dim"],
-    max_len=config["max_len"],
-    num_scales=config["num_scales"],
-    weight_tying=False,
-    device="cuda",
+    tree_encoder=te, max_depth=config["max_depth"],
+    d_model_encoder=config["d_model_encoder"], d_model_decoder=config["d_model_decoder"],
+    num_heads_encoder=config["num_heads_encoder"], num_heads_decoder=config["num_heads_decoder"],
+    num_layers_encoder=config["num_layers_encoder"], num_layers_decoder=config["num_layers_decoder"],
+    d_ff_encoder=config["d_ff_encoder"], d_ff_decoder=config["d_ff_decoder"],
+    dropout_encoder=config["dropout_encoder"], dropout_decoder=config["dropout_decoder"],
+    abs_pos_enc=config["abs_pos_enc"], rel_pos_enc=config["rel_pos_enc"],
+    latent_dim=config["latent_dim"], max_len=config["max_len"], num_scales=config["num_scales"],
+    weight_tying=False, device="cuda"
 )
 
 trainer = TTVAETrainer(
-    model=model,
-    train_trees=train_seqs,
-    val_trees=val_seqs,
-    es_trees=es_seqs,
-    batch_size=config["batch_size"],
-    pad_token_id=te.token_to_id["<PAD>"],
-    cls_token_id=te.token_to_id["<CLS>"],
-    bos_token_id=te.token_to_id["<BOS>"],
-    eos_token_id=te.token_to_id["<EOS>"],
-    unk_token_id=te.token_to_id["<UNK>"],
-    shuffle=True,
-    seed=42,
+    model=model, train_trees=train_seqs, val_trees=val_seqs, es_trees=es_seqs,
+    batch_size=config["batch_size"], pad_token_id=te.token_to_id["<PAD>"],
+    cls_token_id=te.token_to_id["<CLS>"], bos_token_id=te.token_to_id["<BOS>"],
+    eos_token_id=te.token_to_id["<EOS>"], unk_token_id=te.token_to_id["<UNK>"],
+    shuffle=True, seed=42
 )
 
-checkpoint = torch.load(checkpoint_path, map_location=device)
-trainer.model.load_state_dict(checkpoint["model_state_dict"])
-trainer.model.to(device).eval()
+ckp = torch.load(path, map_location=DEVICE)
+trainer.model.load_state_dict(ckp["model_state_dict"])
+trainer.model.to(DEVICE).eval()
 
-ttvae_training_time = get_ttvae_training_time(checkpoint)
-if np.isnan(ttvae_training_time):
-    print("WARNING: TTVAE training time not stored in checkpoint.")
+val_res = trainer.evaluate(split="val")
+print(f"Dataset={DATASET} | metric={METRIC} | size={SIZE} | grid={N_GRID} | dist={args.sample_dist}")
+print("TTVAE validation:", val_res)
 
 
 # ============================================================
-# Output + latent representations
+# OUTPUT
 # ============================================================
-results_dir = os.path.join(
-    args.results_root, dataset,
-    f"size_{args.size_of_trees}",
-    f"grid_{args.n_grid}"
-)
-models_dir = os.path.join(results_dir, "models")
+relative = os.path.join(DATASET, SIZE_TAG, GRID_TAG, f"metric_{METRIC}")
+source_dir = os.path.join(args.results_root, relative)
+results_dir = os.path.join(args.bootstrap_results_root or f"{args.results_root}_bootstrap", relative)
+
+dirs = {name: os.path.join(results_dir, name) for name in ("models", "predictions", "trees", "json")}
+source_dirs = {name: os.path.join(source_dir, name) for name in ("models", "predictions", "trees", "json")}
+for d in dirs.values(): os.makedirs(d, exist_ok=True)
+
+source_csv = os.path.join(source_dir, "results.csv")
 results_csv = os.path.join(results_dir, "results.csv")
+run_config_path = os.path.join(results_dir, "run_config.json")
+source_results = pd.read_csv(source_csv) if os.path.exists(source_csv) else pd.DataFrame()
 
-os.makedirs(results_dir, exist_ok=True)
-if args.save_models: os.makedirs(models_dir, exist_ok=True)
-
-print("Extracting latent representations...")
-X_surrogate = np.asarray(
-    extract_latents(trainer.model, trainer, [x[0] for x in train_seqs_perf]),
-    dtype=np.float64
-)
-print("Latent dataset:", X_surrogate.shape)
-
-
-# ============================================================
-# CART
-# ============================================================
-print("\nTuning CART...")
-cart_clf, cart_results = tune_cart(
-    X_train, y_train, X_val, y_val, X_test, y_test, args.regularizations
-)
-
-print("CART test bootstrap weighted F1:",
-      cart_results["cart_test_f1_weighted_bootstrap_mean"])
-print("CART leaves:", cart_results["cart_num_leaves"])
-
-if args.save_models:
-    with open(os.path.join(models_dir, "cart.pkl"), "wb") as f:
-        pickle.dump(cart_clf, f)
+save_json(run_config_path, {
+    "args": vars(args), "checkpoint_path": path, "checkpoint_config": cfg,
+    "base_config": config, "ttvae_val_res": val_res,
+    "regularizer_sample_size": len(X_train),
+    "regularizer_cap_1_over_sample_size": 1.0 / len(X_train),
+    "regularizer_rule": "effective_lambda_reg = min(requested_lambda_reg, 1 / regularizer_sample_size)",
+    **metadata(path), "sample_dist": args.sample_dist,
+    "source_results_dir": source_dir, "bootstrap_results_dir": results_dir,
+    "bootstrap_n_iter": args.bootstrap_n_iter, "bootstrap_seed": args.bootstrap_seed
+})
 
 
 # ============================================================
-# TREVIS
+# LATENTS
+# ============================================================
+X_sgp = extract_latents(trainer.model, trainer, [x[0] for x in train_seqs_perf]).astype(np.float64)
+
+
+# ============================================================
+# EXPERIMENTS
 # ============================================================
 for requested_lambda in args.regularizations:
-    lambda_reg = effective_lambda(requested_lambda, n_train_samples)
+    lam, lambda_cap, lambda_adjusted = effective_lambda(requested_lambda)
 
-    print("\n" + "=" * 70)
-    print(f"Dataset: {dataset} | requested λ: {requested_lambda} | effective λ: {lambda_reg}")
-    print("=" * 70)
+    print(f"\n{'=' * 70}\nrequested λ={requested_lambda} | effective λ={lam} | cap={lambda_cap} | dist={args.sample_dist}\n{'=' * 70}")
 
-    # Surrogate targets
-    y_surrogate = np.asarray([
-        -regularized_objective(
-            training_metric_from_perf(perf, args.reference_metric),
-            int(perf["n_leaves"]),
-            lambda_reg
-        )
+    y_sgp = np.array([
+        -objective(metric_from_perf(perf), perf["n_leaves"], lam)
         for _, perf in train_seqs_perf
-    ], dtype=np.float64)
+    ]).reshape(-1, 1)
 
-    X_g_train, X_g_test, y_g_train, y_g_test = train_test_split(
-        X_surrogate, y_surrogate, test_size=0.10, random_state=42
+    source_rows = [
+        {
+            "idx": i, "dataset_name": DATASET, **metadata(path),
+            "sample_dist": args.sample_dist, "reference_metric": METRIC,
+            "reference_metric_value": metric_from_perf(perf), "n_leaves": int(perf["n_leaves"]),
+            "requested_lambda_reg": requested_lambda, "effective_lambda_reg": lam,
+            "lambda_reg_adjusted_due_to_sample_size": lambda_adjusted,
+            "lambda_cap_1_over_sample_size": lambda_cap, "regularizer_sample_size": len(X_train),
+            "regularized_objective": objective(metric_from_perf(perf), perf["n_leaves"], lam),
+            "surrogate_target_negative_objective": -objective(metric_from_perf(perf), perf["n_leaves"], lam)
+        }
+        for i, (_, perf) in enumerate(train_seqs_perf)
+    ]
+
+    source_targets_path = os.path.join(
+        dirs["json"],
+        f"source_targets_{SIZE_TAG}_{GRID_TAG}_lambda_requested_{lambda_tag(requested_lambda)}_effective_{lambda_tag(lam)}.json"
     )
+    save_json(source_targets_path, source_rows)
 
-    # Train surrogate
-    torch.manual_seed(42)
     np.random.seed(42)
+    perm = np.random.choice(len(X_sgp), len(X_sgp), replace=False)
+    cut = round(0.9 * len(X_sgp))
 
-    surrogate = MLPPredictor(
-        X_surrogate.shape[1],
-        args.mlp_hidden_dim,
-        args.mlp_lr,
-        args.mlp_weight_decay,
-        trainer.model.device,
-    )
+    X_base_train, X_base_test = X_sgp[perm][:cut], X_sgp[perm][cut:]
+    y_base_train, y_base_test = y_sgp[perm][:cut], y_sgp[perm][cut:]
+
+    mlp = MLPPredictor(X_sgp.shape[1])
 
     start = time.time()
-    surrogate.fit(X_g_train, y_g_train, args.mlp_epochs, args.mlp_batch_size)
-    g_training_time = time.time() - start
-    g_metrics = surrogate.metrics(X_g_test, y_g_test)
+    mlp.fit(X_base_train, y_base_train, X_base_test, y_base_test)
+    mlp_train_time = time.time() - start
+    mlp_raw = mlp.metrics(X_base_test, y_base_test)
 
-    print(f"g Pearson={g_metrics['pearson']:.4f} | RMSE={g_metrics['rmse']:.4f}")
+    mlp_path = os.path.join(
+        dirs["models"],
+        f"mlp_predictor_{SIZE_TAG}_{GRID_TAG}_lambda_requested_{lambda_tag(requested_lambda)}_effective_{lambda_tag(lam)}.pt"
+    )
 
-    # Random restarts
+    torch.save({
+        "model_state_dict": mlp.state_dict(), "input_dim": X_sgp.shape[1],
+        "hidden_dim": args.mlp_hidden_dim, "dataset_name": DATASET, **metadata(path),
+        "sample_dist": args.sample_dist, "requested_lambda_reg": requested_lambda,
+        "effective_lambda_reg": lam, "lambda_reg_adjusted_due_to_sample_size": lambda_adjusted,
+        "lambda_cap_1_over_sample_size": lambda_cap, "regularizer_sample_size": len(X_train),
+        "reference_metric": METRIC, "mlp_metrics_raw": mlp_raw
+    }, mlp_path)
+
     for rand_idx in range(args.bo_rand_start, args.bo_rand_end + 1):
-        torch.manual_seed(rand_idx)
-        if torch.cuda.is_available(): torch.cuda.manual_seed_all(rand_idx)
-        np.random.seed(rand_idx)
+        tag = run_tag(requested_lambda, lam, rand_idx)
 
-        X_search_population = X_g_train.copy()
-        best_tree, best_score, best_iteration = None, -np.inf, None
-        valid_candidates_total = 0
+        paths = {
+            "model": os.path.join(dirs["models"], f"best_clf_pruned_{tag}.pkl"),
+            "unpruned": os.path.join(dirs["models"], f"best_clf_unpruned_{tag}.pkl"),
+            "baseline": os.path.join(dirs["models"], f"baseline_decision_tree_{tag}.pkl")
+        }
+        source_paths = {
+            "model": os.path.join(source_dirs["models"], f"best_clf_pruned_{tag}.pkl"),
+            "unpruned": os.path.join(source_dirs["models"], f"best_clf_unpruned_{tag}.pkl"),
+            "baseline": os.path.join(source_dirs["models"], f"baseline_decision_tree_{tag}.pkl")
+        }
+
+        old_row = find_existing(source_results, rand_idx, requested_lambda, lam)
+        existing = {k: load_pickle(p) for k, p in paths.items()}
+
+        if existing["model"] is None and os.path.exists(source_paths["model"]) and os.path.exists(source_paths["baseline"]):
+            for k in paths:
+                copy_if_exists(source_paths[k], paths[k]); existing[k] = load_pickle(paths[k])
+
+            for split in ("train", "val", "test"):
+                copy_if_exists(
+                    os.path.join(source_dirs["predictions"], f"{split}_predictions_{tag}.csv"),
+                    os.path.join(dirs["predictions"], f"{split}_predictions_{tag}.csv")
+                )
+
+            for name in ("best_clf_pruned", "best_clf_unpruned", "baseline_decision_tree"):
+                copy_if_exists(
+                    os.path.join(source_dirs["trees"], f"{name}_{tag}.txt"),
+                    os.path.join(dirs["trees"], f"{name}_{tag}.txt")
+                )
+
+            copy_if_exists(
+                os.path.join(source_dirs["json"], f"iteration_summaries_{tag}.json"),
+                os.path.join(dirs["json"], f"iteration_summaries_{tag}.json")
+            )
+
+        if existing["model"] is not None and existing["baseline"] is not None:
+            print("Reusing:", tag)
+
+            if old_row is not None:
+                row = old_row.copy()
+            else:
+                trevis_eval = evaluate_classifier(existing["model"], "bayesian_pruned", lam)
+                baseline_eval = evaluate_classifier(existing["baseline"], "baseline", lam)
+
+                row = {
+                    "dataset_name": DATASET, "sample_dist": args.sample_dist,
+                    "requested_lambda_reg": requested_lambda, "effective_lambda_reg": lam,
+                    "lambda_reg_adjusted_due_to_sample_size": lambda_adjusted,
+                    "lambda_cap_1_over_sample_size": lambda_cap, "regularizer_sample_size": len(X_train),
+                    "lambda_reg": lam, "reference_metric": METRIC, "rand_idx": rand_idx,
+                    **evaluation_to_row(trevis_eval, baseline_eval),
+                    "unpruned_depth": tree_depth(existing["unpruned"]) if existing["unpruned"] else None,
+                    "unpruned_n_leaves": tree_leaves(existing["unpruned"]) if existing["unpruned"] else None,
+                    "unpruned_n_nodes": tree_nodes(existing["unpruned"]) if existing["unpruned"] else None
+                }
+
+            row.update({
+                **metadata(path), "sample_dist": args.sample_dist,
+                "model_path": paths["model"], "unpruned_model_path": paths["unpruned"],
+                "baseline_model_path": paths["baseline"], "result_source": "reused_existing_model",
+                "source_results_dir": source_dir, "bootstrap_results_dir": results_dir
+            })
+
+            row = flatten_csv(add_bootstrap(row, existing["model"], existing["baseline"]))
+            save_result(results_csv, row, rand_idx, requested_lambda, lam)
+            continue
+
+        torch.manual_seed(rand_idx); np.random.seed(rand_idx)
+        if torch.cuda.is_available(): torch.cuda.manual_seed(rand_idx); torch.cuda.manual_seed_all(rand_idx)
+
+        X_search, y_search = X_base_train.copy(), y_base_train.copy()
+        mean_y, std_y = y_search.mean(), y_search.std()
+        if std_y == 0: raise ValueError("std_y_train_sgp is zero.")
+
+        y_search = (y_search - mean_y) / std_y
+        y_test_norm = (y_base_test - mean_y) / std_y
+
+        best_clf, best_score, best_iteration, best_candidate = None, -np.inf, 0, {}
+        iteration_times, summaries = [], []
         search_start = time.time()
 
         for iteration in range(args.bo_iterations):
-            # Sample grid
-            if args.sample_dist == "normal":
-                grid = (
-                    X_search_population.mean(0)
-                    + np.random.randn(args.n_grid, X_search_population.shape[1])
-                    * X_search_population.std(0)
-                )
+            iter_start = time.time()
+            train_metrics = mlp.metrics(X_search, y_search)
+            test_metrics = mlp.metrics(X_base_test, y_test_norm)
+
+            if args.sample_dist == "standard_normal":
+                grid = np.random.randn(N_GRID, X_search.shape[1])
+            elif args.sample_dist == "normal":
+                grid = X_search.mean(0) + np.random.randn(N_GRID, X_search.shape[1]) * X_search.std(0)
             else:
-                low, high = X_search_population.min(0), X_search_population.max(0)
-                grid = low + np.random.rand(args.n_grid, X_search_population.shape[1]) * (high - low)
+                lo, hi = X_search.min(0), X_search.max(0)
+                grid = lo + np.random.rand(N_GRID, X_search.shape[1]) * (hi - lo)
 
-            grid_t = torch.tensor(grid, dtype=torch.float32, device=surrogate.device)
+            grid_t = torch.tensor(grid, dtype=torch.float32, device=mlp.device)
 
-            # Gradient ascent
             if args.grad_ascent:
                 grid_t = grid_t.detach().requires_grad_(True)
+
                 for _ in range(args.ga_steps):
-                    gradients = torch.autograd.grad(surrogate(grid_t).sum(), grid_t)[0]
-                    grid_t = (grid_t + args.ga_lr * gradients).detach().requires_grad_(True)
+                    grad = torch.autograd.grad(mlp(grid_t).sum(), grid_t)[0]
+                    grid_t = (grid_t + args.ga_lr * grad).detach().requires_grad_(True)
 
-            # Best surrogate candidates
-            with torch.no_grad():
-                predicted_scores = surrogate(grid_t).detach().cpu().numpy().reshape(-1)
+            with torch.no_grad(): pred = mlp(grid_t).cpu().numpy().reshape(-1)
 
-            selected = np.argsort(-predicted_scores)[:args.candidate_batch_size]
-            next_latents = grid_t[selected].detach().cpu().numpy()
-            valid_features = []
+            idx = np.argsort(-pred)[:args.candidate_batch_size]
+            next_inputs = grid_t[idx].detach().cpu().numpy() if args.grad_ascent else grid[idx]
 
-            # Decode and evaluate
-            for latent in next_latents:
+            valid_features, valid_scores, candidates = [], [], []
+
+            for i, latent in enumerate(next_inputs):
                 try:
-                    seq = decode_latent(trainer, latent).cpu().detach().numpy()
+                    seq = decode_latent(trainer, latent).cpu().numpy()
                     clf = trainer.model.decoder.tree_encoder.decode_tree(seq.tolist()[0])
-
                     train_pred = clf.predict(X_train)
-                    metric = reference_metric(y_train, train_pred, args.reference_metric)
-                    score = -regularized_objective(metric, tree_leaves(clf), lambda_reg)
-                except Exception:
+                    raw_metric = reference_metric(y_train, train_pred)
+                    leaves = tree_leaves(clf)
+                    raw_obj = objective(raw_metric, leaves, lam)
+                    raw_score = -raw_obj
+                    score = (raw_score - mean_y) / std_y
+
+                    candidate = {
+                        "dataset_name": DATASET, **metadata(path), "sample_dist": args.sample_dist,
+                        "requested_lambda_reg": requested_lambda, "effective_lambda_reg": lam,
+                        "lambda_reg_adjusted_due_to_sample_size": lambda_adjusted,
+                        "lambda_cap_1_over_sample_size": lambda_cap, "regularizer_sample_size": len(X_train),
+                        "reference_metric": METRIC, "rand_idx": rand_idx, "iteration": iteration, "candidate_idx": i,
+                        "reference_metric_raw_train": raw_metric, "objective_raw": raw_obj,
+                        "score_raw_negative_objective": raw_score, "score_normalized": score,
+                        "n_leaves": leaves, "n_nodes": tree_nodes(clf), "depth": tree_depth(clf),
+                        **classification_metrics(y_train, train_pred, "candidate_train")
+                    }
+
+                except Exception as e:
+                    print(f"[{i}] candidate failed:", e)
                     continue
 
-                valid_candidates_total += 1
-                valid_features.append(latent)
+                valid_features.append(latent); valid_scores.append(score); candidates.append(candidate)
 
                 if score > best_score:
-                    best_tree, best_score, best_iteration = clf, score, iteration
+                    best_clf, best_score, best_iteration, best_candidate = clf, score, iteration, candidate.copy()
 
             if valid_features:
-                X_search_population = np.concatenate(
-                    [X_search_population, np.asarray(valid_features)], axis=0
-                )
+                X_search = np.concatenate([X_search, np.vstack(valid_features)])
+                y_search = np.concatenate([y_search, np.asarray(valid_scores).reshape(-1, 1)])
 
-            print(
-                f"Iteration {iteration + 1:02d}/{args.bo_iterations} | "
-                f"valid={len(valid_features)} | best={best_score:.6f}"
-            )
+            dt = time.time() - iter_start
+            iteration_times.append(dt)
 
-        search_time = time.time() - search_start
+            summaries.append({
+                "dataset_name": DATASET, **metadata(path), "sample_dist": args.sample_dist,
+                "requested_lambda_reg": requested_lambda, "effective_lambda_reg": lam,
+                "lambda_reg_adjusted_due_to_sample_size": lambda_adjusted,
+                "lambda_cap_1_over_sample_size": lambda_cap, "regularizer_sample_size": len(X_train),
+                "reference_metric": METRIC, "rand_idx": rand_idx, "iteration": iteration,
+                "iteration_time_seconds": dt, "num_valid_candidates": len(candidates),
+                "mean_valid_score_normalized": float(np.mean(valid_scores)) if valid_scores else None,
+                "best_valid_score_normalized": float(np.max(valid_scores)) if valid_scores else None,
+                "best_score_so_far_normalized": float(best_score), "current_X_train_sgp_size": len(X_search),
+                "train_metrics": train_metrics, "test_metrics": test_metrics, "valid_candidates": candidates
+            })
 
-        if best_tree is None:
-            print("No valid tree found; skipping run.")
+            print(f"Iteration {iteration + 1}/{args.bo_iterations} | valid={len(candidates)} | best={best_score:.6f}")
+
+        if best_clf is None:
+            print("No valid classifier found.")
             continue
 
-        # Final pruned model
-        pruned_tree = best_tree.prune()
-        val_pred, test_pred = pruned_tree.predict(X_val), pruned_tree.predict(X_test)
+        search_time = time.time() - search_start
+        pruned = best_clf.prune()
+        baseline = DecisionTreeClassifier(max_depth=4, random_state=42, ccp_alpha=0.0001).fit(X_train, y_train)
 
-        val_f1 = f1_score(y_val, val_pred, average="weighted", zero_division=0)
-        boot = bootstrap_weighted_f1(
-            y_test, test_pred, args.bootstrap_n_iter, args.bootstrap_seed + rand_idx
-        )
+        trevis_eval = evaluate_classifier(pruned, "bayesian_pruned", lam)
+        baseline_eval = evaluate_classifier(baseline, "baseline", lam)
+        best_score_raw = best_score * std_y + mean_y
 
-        n_leaves, depth = tree_leaves(pruned_tree), tree_depth(pruned_tree)
-        val_ref = reference_metric(y_val, val_pred, args.reference_metric)
-        test_ref = reference_metric(y_test, test_pred, args.reference_metric)
+        for clf, p in [(pruned, paths["model"]), (best_clf, paths["unpruned"]), (baseline, paths["baseline"])]:
+            with open(p, "wb") as f: pickle.dump(clf, f)
 
-        val_obj = regularized_objective(val_ref, n_leaves, lambda_reg)
-        test_obj = regularized_objective(test_ref, n_leaves, lambda_reg)
+        pred_paths = {}
+        if args.save_predictions:
+            for split, (_, y) in DATASETS.items():
+                p = os.path.join(dirs["predictions"], f"{split}_predictions_{tag}.csv")
+                pd.DataFrame({
+                    "dataset_name": DATASET, "sample_dist": args.sample_dist,
+                    "requested_lambda_reg": requested_lambda, "effective_lambda_reg": lam,
+                    "lambda_reg_adjusted_due_to_sample_size": lambda_adjusted,
+                    "lambda_cap_1_over_sample_size": lambda_cap, "regularizer_sample_size": len(X_train),
+                    "reference_metric": METRIC, "rand_idx": rand_idx, **metadata(path),
+                    f"y_{split}_true": np.asarray(y),
+                    f"y_{split}_pred_bayesian_pruned": np.asarray(trevis_eval["pred"][split]),
+                    f"y_{split}_pred_baseline": np.asarray(baseline_eval["pred"][split])
+                }).to_csv(p, index=False)
+                pred_paths[split] = p
 
-        total_time = g_training_time + search_time
-        if not np.isnan(ttvae_training_time):
-            total_time += ttvae_training_time
+        tree_paths = {}
+        if args.save_tree_text:
+            for name, clf in {
+                "best_clf_pruned": pruned,
+                "best_clf_unpruned": best_clf,
+                "baseline_decision_tree": baseline
+            }.items():
+                p = os.path.join(dirs["trees"], f"{name}_{tag}.txt")
+                with open(p, "w") as f: f.write(safe_tree_text(clf, feature_names))
+                tree_paths[name] = p
 
-        result = {
-            "dataset": dataset,
-            "size_of_trees": args.size_of_trees,
-            "n_grid": args.n_grid,
-            "reference_metric": args.reference_metric,
-            "requested_lambda": requested_lambda,
-            "effective_lambda": lambda_reg,
-            "rand_idx": rand_idx,
-            "best_iteration": best_iteration,
-            "valid_candidates_total": valid_candidates_total,
+        summary_path = os.path.join(dirs["json"], f"iteration_summaries_{tag}.json")
+        save_json(summary_path, summaries)
 
-            "trevis_val_f1_weighted": float(val_f1),
-            "trevis_test_f1_weighted": boot["test_f1_weighted"],
-            "trevis_test_f1_weighted_bootstrap_mean": boot["test_f1_weighted_bootstrap_mean"],
-            "trevis_test_f1_weighted_bootstrap_std": boot["test_f1_weighted_bootstrap_std"],
-            "trevis_test_f1_weighted_bootstrap_ci_low": boot["test_f1_weighted_bootstrap_ci_low"],
-            "trevis_test_f1_weighted_bootstrap_ci_high": boot["test_f1_weighted_bootstrap_ci_high"],
+        row = {
+            "dataset_name": DATASET, **metadata(path), "sample_dist": args.sample_dist,
+            "requested_lambda_reg": requested_lambda, "effective_lambda_reg": lam,
+            "lambda_reg_adjusted_due_to_sample_size": lambda_adjusted,
+            "lambda_cap_1_over_sample_size": lambda_cap, "regularizer_sample_size": len(X_train),
+            "lambda_reg": lam, "reference_metric": METRIC, "rand_idx": rand_idx, "best_iteration": best_iteration,
 
-            "trevis_num_leaves": n_leaves,
-            "trevis_depth": depth,
-            "trevis_val_reference_metric": float(val_ref),
-            "trevis_test_reference_metric": float(test_ref),
-            "trevis_val_objective": float(val_obj),
-            "trevis_test_objective": float(test_obj),
-            "best_train_negative_objective": float(best_score),
+            "best_score_normalized_train": best_score,
+            "best_score_raw_train_negative_objective": best_score_raw,
+            "best_objective_raw_train": -best_score_raw,
 
-            "surrogate_test_pearson": g_metrics["pearson"],
-            "surrogate_test_rmse": g_metrics["rmse"],
+            **evaluation_to_row(trevis_eval, baseline_eval),
 
-            "ttvae_training_time_seconds": ttvae_training_time,
-            "g_training_time_seconds": g_training_time,
-            "gradient_search_time_seconds": search_time,
-            "trevis_total_time_seconds": total_time,
+            "unpruned_depth": tree_depth(best_clf),
+            "unpruned_n_leaves": tree_leaves(best_clf),
+            "unpruned_n_nodes": tree_nodes(best_clf),
 
-            **cart_results,
+            "mlp_train_time_seconds": mlp_train_time,
+            "mlp_test_mse_raw": mlp_raw["mse"],
+            "mlp_test_rmse_raw": mlp_raw["rmse"],
+            "mlp_test_pearson_raw": mlp_raw["pearson"],
+
+            "final_mlp_train_mse_normalized": train_metrics["mse"],
+            "final_mlp_train_rmse_normalized": train_metrics["rmse"],
+            "final_mlp_train_pearson_normalized": train_metrics["pearson"],
+            "final_mlp_test_mse_normalized": test_metrics["mse"],
+            "final_mlp_test_rmse_normalized": test_metrics["rmse"],
+            "final_mlp_test_pearson_normalized": test_metrics["pearson"],
+
+            "num_bo_iterations": len(iteration_times),
+            "iteration_times_seconds": iteration_times,
+            "mean_iteration_time_seconds": float(np.mean(iteration_times)),
+            "std_iteration_time_seconds": float(np.std(iteration_times)),
+            "total_rand_time_seconds": search_time,
+
+            "model_path": paths["model"],
+            "unpruned_model_path": paths["unpruned"],
+            "baseline_model_path": paths["baseline"],
+            "mlp_model_path": mlp_path,
+
+            **{f"{s}_predictions_path": pred_paths.get(s) for s in ("train", "val", "test")},
+
+            "pruned_tree_text_path": tree_paths.get("best_clf_pruned"),
+            "unpruned_tree_text_path": tree_paths.get("best_clf_unpruned"),
+            "baseline_tree_text_path": tree_paths.get("baseline_decision_tree"),
+            "iteration_summary_path": summary_path,
+            "source_targets_path": source_targets_path,
+            "run_config_path": run_config_path,
+
+            **{f"best_candidate_{k}": v for k, v in best_candidate.items()},
+
+            "result_source": "trained_new",
+            "source_results_dir": source_dir,
+            "bootstrap_results_dir": results_dir
         }
 
-        if args.save_models:
-            model_name = (
-                f"trevis_lambda_{requested_lambda}_"
-                f"effective_{lambda_reg}_rand_{rand_idx}.pkl"
-            )
-            with open(os.path.join(models_dir, model_name), "wb") as f:
-                pickle.dump(pruned_tree, f)
-
-        save_result_row(results_csv, result)
+        row = flatten_csv(add_bootstrap(row, pruned, baseline))
+        save_result(results_csv, row, rand_idx, requested_lambda, lam)
 
         print(
-            f"\nRESULT | F1={boot['test_f1_weighted_bootstrap_mean']:.4f} | "
-            f"leaves={n_leaves} | Pearson={g_metrics['pearson']:.4f} | "
-            f"RMSE={g_metrics['rmse']:.4f} | g={g_training_time:.2f}s | "
-            f"search={search_time:.2f}s"
+            f"Saved λ={requested_lambda}, rand={rand_idx} | "
+            f"test {METRIC}={trevis_eval['ref']['test']:.4f} | leaves={trevis_eval['leaves']}"
         )
 
 
-# ============================================================
-# Summary
-# ============================================================
-print("\n" + "=" * 70)
-print("ALL EXPERIMENTS COMPLETED")
-print("Results:", results_csv)
-
-if os.path.exists(results_csv):
-    results = pd.read_csv(results_csv)
-
-    columns = [
-        "dataset", "requested_lambda", "effective_lambda", "rand_idx",
-        "trevis_test_f1_weighted_bootstrap_mean", "trevis_num_leaves",
-        "surrogate_test_pearson", "surrogate_test_rmse",
-        "ttvae_training_time_seconds", "g_training_time_seconds",
-        "gradient_search_time_seconds", "trevis_total_time_seconds",
-        "cart_test_f1_weighted_bootstrap_mean", "cart_num_leaves",
-        "cart_training_time_seconds",
-    ]
-
-    print(results[[c for c in columns if c in results.columns]].to_string(index=False))
+print("\nAll done.")
+print(f"Results: {results_csv}")
+print(f"Results folder: {results_dir}")
+print(f"Source folder: {source_dir}")
+print(f"size={SIZE} | grid={N_GRID} | dist={args.sample_dist}")
