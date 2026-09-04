@@ -84,6 +84,15 @@ https://huggingface.co/mstz/datasets
 * stud - https://archive.ics.uci.edu/ml/datasets/student+performance
 * wine - https://www.kaggle.com/datasets/ghassenkhaled/wine-quality-data
 
+**If you use TREVIS for your research, please cite:**
+```bibtex
+  @article{fidone2026learning,
+  title={Learning Sparse Decision Trees via Transformer Variational Auto-Encoders},
+  author={Fidone, Giacomo and Cascione, Alessio and Guidotti, Riccardo},
+  journal={arXiv preprint arXiv:2609.01430},
+  year={2026}
+}
+```
 
 # License
 TREVIS is distributed under the GNU General Public License. Refer to LICENSE.txt for details.
